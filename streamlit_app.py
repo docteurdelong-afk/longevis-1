@@ -381,16 +381,101 @@ def scene_analyse(cx, spread, fps, passes, turns):
 st.markdown('<span class="iv-inst">Longevity Institute · Metrology of Vitality</span>'
             '<span class="iv-tag"><i></i>Analyse vidéo</span>'
             '<h1 class="iv-title">LongeVis</h1>'
-            '<p class="iv-lede">Une vidéo de quelqu\'un qui marche suffit à mesurer '
-            'sa vitesse, sa cadence, l\'amplitude de ses pas et ce que lui coûtent '
-            'ses demi-tours.</p>', unsafe_allow_html=True)
+            '<p class="iv-lede">Sept gestes filmés au téléphone suffisent à mesurer '
+            'la marche, l\'équilibre, la force et la mobilité qui comptent pour '
+            'l\'autonomie — un onglet par geste, aucun matériel supplémentaire.</p>',
+            unsafe_allow_html=True)
 
-fichier = st.file_uploader("Vidéo de marche")
-st.caption("MP4, MOV, AVI, MKV, WebM, M4V. Sur Android, imposer un format ici "
-           "fait parfois disparaître toutes les vidéos du sélecteur — le format "
-           "est donc vérifié après le choix du fichier, pas avant.")
-lancer = st.button("Analyser", type="primary", disabled=fichier is None,
-                   use_container_width=True)
+EXTENSIONS_VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+
+TAILLE_REJEU_FACTEUR = {"compact": 0.7, "normal": 0.9, "grand": 1.15, "immense": 1.5}
+MOUVEMENT_SIGNAL = {"horizontal": "cx", "vertical": "cy", "membres": "spread"}
+
+LABELS_SIGNAUX = {
+    "cx": "Position horizontale du sujet",
+    "cy": "Position verticale du sujet",
+    "trunk_y": "Position verticale du tronc",
+    "foot_y": "Hauteur du pied",
+    "height_px": "Hauteur de la silhouette",
+    "height": "Hauteur de la silhouette",
+    "spread": "Écartement des membres",
+}
+
+
+def _signal_defaut(test, features):
+    """Clé du signal proposé par défaut dans le sélecteur d'incrustation —
+    dynamique pour le mouvement libre, où le signal le plus parlant dépend
+    de ce qui a été filmé."""
+    if test["cle"] == "mouvement":
+        return MOUVEMENT_SIGNAL.get(features.get("move_source"), "cx")
+    return test["signal_cle"]
+
+
+def _cartes_html(metriques):
+    return "".join(carte(nom, val, unite, dec=dec) for (nom, val, unite, dec) in metriques)
+
+
+TESTS_GESTES = [
+    {"cle": "tonus", "titre": "Tonus (gainage)",
+     "aide": "Filmez de profil, en appui sur avant-bras et pointes de pieds, "
+             "en restant le plus immobile possible.",
+     "fn": pipeline.analyze_tonus,
+     "metriques": lambda f: [
+         ("Durée tenue", f.get("gainage_duree_s"), " s", 1),
+         ("Stabilité", f.get("gainage_stabilite"), "/100", 0),
+         ("Alignement", f.get("gainage_alignement"), "/100", 0),
+     ],
+     "signal_cle": "trunk_y", "signal_titre": "Position verticale du tronc", "signal_unite": "px"},
+    {"cle": "sollicitation", "titre": "Sollicitation anti-ostéoporotique",
+     "aide": "Filmez de profil ou de face une série de petits sauts talon au sol.",
+     "fn": pipeline.analyze_sollicitation,
+     "metriques": lambda f: [
+         ("Impacts détectés", f.get("impact_nombre"), "", 0),
+         ("Cadence", f.get("impact_taux_par_min"), " /min", 0),
+         ("Vitesse à l'impact", f.get("impact_vitesse_descente"), " m/s", 2),
+     ],
+     "signal_cle": "foot_y", "signal_titre": "Hauteur du pied", "signal_unite": "px"},
+    {"cle": "elasticite", "titre": "Élasticité",
+     "aide": "Filmez de face une flexion avant ou un étirement tenu au point le plus loin.",
+     "fn": pipeline.analyze_elasticite,
+     "metriques": lambda f: [
+         ("Amplitude", f.get("flexion_amplitude_pct"), " %", 0),
+         ("Tenue au maximum", f.get("flexion_maintien_s"), " s", 1),
+     ],
+     "signal_cle": "height_px", "signal_titre": "Hauteur de la silhouette", "signal_unite": "px"},
+    {"cle": "equilibre", "titre": "Équilibre",
+     "aide": "Filmez de face un appui unipodal (une jambe levée), bras croisés, "
+             "en restant immobile 15 à 30 secondes.",
+     "fn": pipeline.analyze_equilibre,
+     "metriques": lambda f: [
+         ("Oscillation avant-arrière", f.get("sway_rms_ap_mm"), " mm", 1),
+         ("Oscillation latérale", f.get("sway_rms_ml_mm"), " mm", 1),
+         ("Vitesse d'oscillation", f.get("sway_path_mm_s"), " mm/s", 0),
+     ],
+     "signal_cle": "cx", "signal_titre": "Position du centre du corps", "signal_unite": "px"},
+    {"cle": "transfert", "titre": "Transferts assis-debout",
+     "aide": "Filmez de profil une série de levers et d'assises depuis une chaise, "
+             "à un rythme régulier.",
+     "fn": pipeline.analyze_transfert,
+     "metriques": lambda f: [
+         ("Levers détectés", f.get("sts_count"), "", 0),
+         ("Durée moyenne", f.get("sts_mean_dur_s"), " s", 1),
+         ("Vitesse de lever", f.get("sts_rise_speed"), " stature/s", 2),
+         ("Oscillation résiduelle après le lever", f.get("ispt_residuel_mm_s"), " mm/s", 0),
+     ],
+     "signal_cle": "height", "signal_titre": "Hauteur de la silhouette", "signal_unite": "px"},
+    {"cle": "mouvement", "titre": "Mouvement libre",
+     "aide": "Filmez de face ou de profil un mouvement répété au choix : "
+             "gymnastique douce, tai-chi, geste de rééducation.",
+     "fn": pipeline.analyze_mouvement_libre,
+     "metriques": lambda f: [
+         ("Amplitude du geste", f.get("move_amplitude_stature"), " ×stature", 2),
+         ("Rythme", f.get("move_rate_cpm"), " cycles/min", 0),
+         ("Temps actif", f.get("move_active_pct"), " %", 0),
+     ],
+     "signal_cle": "cx", "signal_titre": "Signal du mouvement", "signal_unite": "px"},
+]
+
 
 with st.sidebar:
     st.markdown('<p class="iv-lab" style="margin-bottom:10px">Réglages</p>',
@@ -426,405 +511,455 @@ with st.sidebar:
     q_douleur = st.slider("Douleur, là maintenant", 0, 10, 5,
                           help="0 = aucune douleur, 10 = douleur maximale")
 
-EXTENSIONS_VIDEO = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+    st.markdown('<p class="iv-lab" style="margin:24px 0 4px">Vidéo — six mesures '
+                'complémentaires</p>', unsafe_allow_html=True)
+    st.caption("Tonus, sollicitation, élasticité, équilibre, transferts assis-debout "
+               "et mouvement libre : une seule vidéo suffit pour les six onglets.")
+    video_geste = st.file_uploader(
+        "Vidéo pour les six gestes", key="geste_video_partage",
+        help="Une seule vidéo suffit : chaque onglet ci-dessous l'analyse pour son "
+             "propre geste.")
 
-if not (lancer and fichier is not None):
-    st.markdown(scene_repos(), unsafe_allow_html=True)
-    st.markdown(LEGENDE, unsafe_allow_html=True)
-elif os.path.splitext(fichier.name)[1].lower() not in EXTENSIONS_VIDEO:
-    st.markdown('<div class="iv-msg iv-msg--stop"><b>Format non reconnu.</b> '
-                f'« {fichier.name} » ne ressemble pas à une vidéo. Formats acceptés '
-                ': MP4, MOV, AVI, MKV, WebM, M4V.</div>', unsafe_allow_html=True)
-else:
-    chemin = None
-    try:
-        suffixe = os.path.splitext(fichier.name)[1] or ".mp4"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffixe) as tmp:
-            tmp.write(fichier.getbuffer())
-            chemin = tmp.name
+    video_id_actuel = getattr(video_geste, "file_id", None)
+    if video_id_actuel is None and video_geste is not None:
+        video_id_actuel = (video_geste.name, video_geste.size)
 
-        with st.spinner("Analyse en cours — une à trois minutes…"):
-            traces = body.extract_body(chemin)
-            res = pipeline.analyze(
-                chemin, mode="mouvement",
-                subject_height_m=None if echelle > 0 else taille,
-                px_per_m=echelle if echelle > 0 else None, strict=False)
-
-        f, meta = res["features"], res["meta"]
-        segs = res.get("segments") or {"passes": [], "turns": []}
-        sig = res.get("_signals", {})
-        g = lambda k: f.get(k, float("nan"))
-
-        cx = np.asarray(sig.get("body_cx", traces.centroid[:, 0]), dtype=float)
-        spread = np.asarray(sig.get("body_spread", traces.leg_spread), dtype=float)
-        fps_p = float(sig.get("body_fps", traces.fps))
-        if np.isfinite(cx).sum() > 10:
-            st.markdown(scene_analyse(cx, spread, fps_p, segs.get("passes", []),
-                                      segs.get("turns", [])), unsafe_allow_html=True)
-            st.markdown('<div class="iv-key">'
-                        '<span><i class="k1"></i>déplacement et rythme du sujet</span>'
-                        f'<span><i class="k2"></i>{g("n_steps"):.0f} pas détectés</span>'
-                        f'<span><i class="k3"></i>{g("n_turns"):.0f} demi-tours</span>'
-                        '</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(scene_repos(), unsafe_allow_html=True)
-
-        if not (np.isfinite(g("gait_speed_m_s")) or np.isfinite(g("cadence_spm"))):
-            st.markdown('<div class="iv-msg iv-msg--stop"><b>Aucune marche '
-                        'mesurable dans cette vidéo.</b> Les causes, par fréquence :'
-                        '<ol><li>Le sujet ne <b>traverse</b> pas l\'image. Il faut '
-                        'des allers-retours latéraux, pas du surplace ni de la '
-                        'marche vers la caméra.</li>'
-                        '<li>La caméra bouge. Posez-la sur un support.</li>'
-                        '<li>Le sujet est trop près : cadrez le corps entier avec '
-                        'de la marge.</li>'
-                        '<li>Vidéo trop courte : 30 secondes au moins.</li></ol>'
-                        '</div>', unsafe_allow_html=True)
-
-        bio = kinexa.biomarqueurs(f, meta, age if age > 0 else None) if kinexa else None
-        if bio is None:
-            st.markdown('<div class="iv-msg">Module des biomarqueurs absent : '
-                        'déposez <b>longevis/kinexa.py</b> dans le dépôt pour '
-                        'afficher les quatre lectures de l\'Institut.</div>',
-                        unsafe_allow_html=True)
-        bm, npx, ka, vm = ((bio["bio_mobility"], bio["neuroplasticity"],
-                            bio["kinetic_age"], bio["vitality_margin"])
-                           if bio else ({}, {}, {}, {}))
-        ref = ("classe d'âge" if bm.get("compare_age") else "population adulte")
-        if bm.get("libre"):
-            ref = "amplitude, vigueur et occupation du geste"
-        ecart = ka.get("ecart", float("nan"))
-        if np.isfinite(ecart):
-            sens = "de plus" if ecart > 0 else "de moins"
-            note_age = f"{abs(ecart):.0f} an(s) {sens} que l'âge déclaré"
-        elif ka.get("plateau"):
-            note_age = "avant 65 ans, la vitesse ne date pas une personne"
-        else:
-            note_age = ("lu sur la vigueur du geste" if ka.get("approx")
-                        else "lu dans la vitesse de marche")
-        att = vm.get("attendu", float("nan"))
-        note_vm = (f'attendu {att:.2f} m/s pour '
-                   + ("cet âge" if vm.get("compare_age") else "un adulte")
-                   ) if np.isfinite(att) else "vitesse non mesurée"
-
-        src = str(f.get("speed_source", ""))
-
-        # ── rejeu de la vidéo avec les chiffres incrustés ──────────────────
-        if hologramme is not None and bio:
-            try:
-                html = hologramme.rejeu(chemin, bio, f, res.get("_signals", {}), meta)
-            except Exception:
-                html = None
-            if html:
-                st.markdown('<p class="iv-h">Rejeu incrusté</p>', unsafe_allow_html=True)
-                facteur = {"compact": 0.7, "normal": 0.9,
-                           "grand": 1.15, "immense": 1.5}.get(taille_rejeu, 1.0)
-                components.html(html,
-                                height=int(hologramme.hauteur_composant(meta) * facteur),
-                                scrolling=False)
-                st.markdown('<p class="iv-cap" style="margin:-6px 0 22px">'
-                            'Les quatre lectures montent à l\'ouverture ; la vitesse et '
-                            'le compteur de pas suivent l\'image.</p>',
-                            unsafe_allow_html=True)
-            else:
-                st.markdown('<p class="iv-cap">Vidéo trop lourde pour le rejeu incrusté '
-                            '(28 Mo maximum). Les mesures restent complètes.</p>',
-                            unsafe_allow_html=True)
-
-        if bio:
-            st.markdown('<p class="iv-h">Biomarqueurs · Kinexa Longevity Institute</p>',
-                            unsafe_allow_html=True)
-            st.markdown('<div class="iv-grid">'
-                        + carte("Bio-Mobility Score", bm["score"], "/100",
-                                f'{ref} · couverture {100*bm["couverture"]:.0f} %',
-                                hero=True, dec=0)
-                        + carte("Neuroplasticity Index", npx["score"], "/100",
-                                f'régularité et fluidité · couverture '
-                                f'{100*npx["couverture"]:.0f} %', dec=0)
-                        + carte("Kinetic Ageing Profile", ka["age"],
-                                (f' ans ± {ka["marge"]:.0f}'
-                                 if np.isfinite(ka.get("marge", float("nan"))) else " ans"),
-                                note_age, dec=0)
-                        + carte("Vitality Margin", vm["marge_pct"], "%", note_vm, dec=0)
-                        + '</div>', unsafe_allow_html=True)
-            st.markdown('<p class="iv-cap" style="margin:-4px 0 18px">Agrégats lisibles, '
-                        'sans valeur diagnostique. La couverture indique la part de mesures '
-                        'réellement disponibles derrière chaque score.</p>',
-                        unsafe_allow_html=True)
-
-        # ── profil de vitalité : courbe d'âge, radar, frise ────────────────
-        if vue is not None and bio:
-            st.markdown('<p class="iv-h">Profil de vitalité</p>', unsafe_allow_html=True)
-            st.markdown('<div class="iv-stage" style="margin-top:0;padding:6px 4px">'
-                        + vue.courbe_age(kinexa.COURBE_AGE, g("gait_speed_m_s"),
-                                         ka.get("age"), age if age > 0 else None)
-                        + '</div>', unsafe_allow_html=True)
-            st.markdown('<p class="iv-cap" style="margin:8px 0 20px">'
-                        'La courbe est la vitesse confortable attendue par décennie ; '
-                        'la bande, la dispersion habituelle. Le point est le sujet, '
-                        'le trait vertical son âge locomoteur.</p>',
-                        unsafe_allow_html=True)
-
-            colr, colf = st.columns([1, 1.35], gap="large")
-            with colr:
-                svg = vue.radar(vue.axes_vitalite(f, bio))
-                if svg:
-                    st.markdown('<div class="iv-stage" style="margin-top:0;padding:4px">'
-                                + svg + '</div>', unsafe_allow_html=True)
-            with colf:
-                seg = res.get("segments") or {}
-                fr = vue.frise(seg.get("passes", []), seg.get("turns", []),
-                               int(meta.get("n_frames") or 0),
-                               float(meta.get("fps") or 25.0))
-                if fr:
-                    st.markdown('<div class="iv-stage" style="margin-top:0;padding:4px">'
-                                + fr + '</div>', unsafe_allow_html=True)
-                st.markdown('<p class="iv-cap">Bleu : les trajets rectilignes. '
-                            'Violet : les demi-tours, dont la durée est le marqueur '
-                            'le plus discriminant du lever-marcher chronométré.</p>',
-                            unsafe_allow_html=True)
-
-        st.markdown('<p class="iv-h">Mesures principales</p>', unsafe_allow_html=True)
-        st.markdown('<p class="iv-cap" style="margin:-10px 0 14px">Mesuré '
-                    'directement sur la personne filmée.</p>', unsafe_allow_html=True)
-        st.markdown('<div class="iv-grid">'
-                    + carte("Vitesse de marche", g("gait_speed_m_s"), "m/s",
-                            f.get("gait_speed_band", ""), hero=True)
-                    + carte("Cadence", g("cadence_spm"), "pas/min", dec=0)
-                    + carte("Amplitude du pas", g("step_length_m"), "m")
-                    + carte("Pas analysés", g("n_steps"), "", dec=0)
-                    + carte("Demi-tours", g("n_turns"), "", dec=0)
-                    + carte("Durée", meta.get("duration_s"), "s", dec=0)
-                    + '</div>', unsafe_allow_html=True)
-
-        st.markdown('<p class="iv-h">Ressenti déclaré</p>', unsafe_allow_html=True)
-        st.markdown('<div class="iv-grid">'
-                    + carte("Énergie perçue", q_energie, "/10", dec=0)
-                    + carte("Fatigue", q_fatigue, "/10", dec=0)
-                    + carte("Humeur", q_humeur, "/10", dec=0)
-                    + carte("Forme générale", q_forme, "/10", dec=0)
-                    + carte("Douleur au test", q_douleur, "/10", dec=0)
-                    + '</div>'
-                    '<p class="iv-cap" style="margin:10px 0 0">Auto-évaluation au '
-                    'moment du test, non mesurée par la vidéo — à lire à côté des '
-                    'indices ci-dessus, pas à la place.</p>', unsafe_allow_html=True)
-
-        st.markdown('<p class="iv-h">Indices composites</p>', unsafe_allow_html=True)
-        st.markdown('<div class="iv-grid">'
-                    + carte("Réserve dynamique · IRD", g("ird_reserve_dynamique"),
-                            "pas", "Pas dépensés à chaque demi-tour", hero=True)
-                    + carte("Signature de foulée · SCF", g("scf_signature_foulee"),
-                            "", "Élevé : pas amples. Bas : pas hachés.",
-                            hero=True, dec=3)
-                    + '</div>'
-                    '<div class="iv-msg">Ces deux indices sont des rapports sans '
-                    'dimension : ils ne dépendent ni de la calibration, ni de la '
-                    'distance de la caméra. Ce sont des <b>hypothèses de '
-                    'recherche</b>, non validées sur cohorte humaine — à lire en '
-                    'comparant une personne à elle-même dans le temps.</div>',
-                    unsafe_allow_html=True)
-
-        st.markdown('<p class="iv-h">Contrôle technique de l\'acquisition</p>',
-                    unsafe_allow_html=True)
-        st.markdown('<p class="iv-cap" style="margin:-10px 0 12px">Qualité de la '
-                    'prise de vue — pas une mesure de la personne filmée.</p>',
-                    unsafe_allow_html=True)
-        with st.expander("Afficher le détail technique", expanded=False):
-            c1, c2 = st.columns([3, 2])
-            with c1:
-                if traces.preview is not None:
-                    st.image(traces.preview[:, :, ::-1],
-                             caption="Cadre vert : silhouette détectée. "
-                                     "Trait orange : zone des jambes.",
-                             use_container_width=True)
-                else:
-                    st.markdown('<div class="iv-msg iv-msg--stop">Aucune '
-                                'silhouette isolée. La caméra bouge, le fond est '
-                                'chargé, ou le sujet occupe presque tout le '
-                                'champ.</div>', unsafe_allow_html=True)
-            with c2:
-                st.markdown('<div class="iv-grid" style="grid-template-columns:1fr 1fr">'
-                            + carte("Corps détecté", traces.detection_rate * 100, "%",
-                                    dec=0)
-                            + carte("Caméra", traces.camera_motion_px, "px/img")
-                            + carte("Trajets", g("n_passes"), "", dec=0)
-                            + carte("Échelle", g("px_per_m"), "px/m", dec=0)
-                            + '</div>', unsafe_allow_html=True)
-                for a in ([] if True else
-                          ["La caméra bouge. Posez-la sur un support stable."]) + \
-                         ([] if traces.detection_rate >= 0.6 else
-                          ["Corps mal détecté. Reculez, dégagez le fond."]) + \
-                         ([] if meta.get("task") == "marche" else
-                          [f"Activité reconnue : « {meta.get('task')} ». "
-                           "Pour la marche, filmez des allers-retours."]):
-                    st.markdown(f'<div class="iv-msg iv-msg--warn">{a}</div>',
-                                unsafe_allow_html=True)
-                conseils = ([] if traces.camera_motion_px <= 0.5 else
-                            ["Caméra en mouvement : posez-la sur un support."]) + \
-                           ([] if traces.detection_rate >= 0.6 else
-                            ["Silhouette peu détectée : reculez, dégagez le fond."])
-                if conseils:
-                    st.markdown('<p class="iv-cap">' + ' · '.join(conseils) + '</p>',
-                                unsafe_allow_html=True)
-
-        import json as _json
-        mesurable = {k: (round(float(v), 4) if isinstance(v, (int, float)) else v)
-                     for k, v in f.items()
-                     if isinstance(v, (int, float, str))}
-        mesurable["quest_energie"] = q_energie
-        mesurable["quest_fatigue"] = q_fatigue
-        mesurable["quest_humeur"] = q_humeur
-        mesurable["quest_forme_generale"] = q_forme
-        mesurable["quest_douleur"] = q_douleur
-        mesurable["_meta"] = {k: v for k, v in meta.items()
-                              if isinstance(v, (int, float, str))}
-        csv = "mesure;valeur\n" + "\n".join(
-            f"{k};{v}" for k, v in sorted(mesurable.items()) if k != "_meta")
-        cta, ctb = st.columns(2)
-        cta.download_button("⬇ mesures (CSV)", csv, file_name="kinexa_mesures.csv",
-                            mime="text/csv", use_container_width=True)
-        ctb.download_button("⬇ tout (JSON)", _json.dumps(mesurable, ensure_ascii=False,
-                                                          indent=1),
-                            file_name="kinexa_mesures.json", mime="application/json",
-                            use_container_width=True)
-
-        with st.expander("Détail des scores"):
-            for titre, bloc in [("Bio-Mobility Score", bm), ("Neuroplasticity Index", npx)]:
-                d = (bloc or {}).get("detail") or {}
-                if not d:
-                    continue
-                st.markdown(f'<p class="iv-lab" style="margin:6px 0 4px">{titre} · '
-                            f'couverture {100*(bloc.get("couverture") or 0):.0f} %</p>',
-                            unsafe_allow_html=True)
-                st.markdown('<table class="iv-tbl"><tbody>' + "".join(
-                    f'<tr><td>{LABELS.get(k, k)}</td>'
-                    f'<td class="iv-v">{v:.0f}<span class="iv-r"> / 100</span></td></tr>'
-                    for k, v in d.items()) + '</tbody></table>', unsafe_allow_html=True)
-            st.caption("Chaque marqueur est noté sur 100 par rapport à sa référence, "
-                       "puis pondéré. Les marqueurs absents ne pèsent pas.")
-
-        with st.expander("Toutes les mesures"):
-            L = ['<table class="iv-tbl"><thead><tr><th>Mesure</th><th>Valeur</th>'
-                 '<th>Référence</th><th>Statut</th></tr></thead><tbody>']
-            for titre, cles in GROUPES:
-                dispo = [k for k in cles if isinstance(f.get(k), (int, float))
-                         and np.isfinite(f.get(k))]
-                if not dispo:
-                    continue
-                L.append(f'<tr><td class="iv-g" colspan="4">{titre}</td></tr>')
-                for k in dispo:
-                    v = f[k]
-                    norm = REFERENCE_NORMS.get(k)
-                    ref = f"{norm[0]:g} ± {norm[1]:g}" if norm else "—"
-                    dec = 3 if abs(v) < 1 else (0 if abs(v) > 100 else 2)
-                    L.append(f'<tr><td>{LABELS.get(k, k)}</td>'
-                             f'<td class="iv-v">{v:.{dec}f} '
-                             f'<span style="color:var(--faint);font-size:11.5px">'
-                             f'{UNITS.get(k, "")}</span></td>'
-                             f'<td class="iv-r">{ref}</td><td>{tag(k)}</td></tr>')
-            L.append('</tbody></table>')
-            st.markdown("".join(L), unsafe_allow_html=True)
-            st.markdown('<div class="iv-msg"><b>Non résolu</b> : le bruit propre de '
-                        'la méthode dépasse l\'écart attendu entre deux personnes. '
-                        'La valeur est exacte, mais elle ne permet pas de les '
-                        'distinguer.<br><b>Non fiable</b> : indice n\'ayant pas '
-                        'passé sa validation, à ne pas interpréter.</div>',
-                        unsafe_allow_html=True)
-
-    except Exception:
-        st.markdown('<div class="iv-msg iv-msg--stop"><b>L\'analyse a échoué.</b> '
-                    'Vérifiez que le fichier est une vidéo lisible.</div>',
-                    unsafe_allow_html=True)
-        st.code(traceback.format_exc(limit=2))
-    finally:
-        if chemin and os.path.exists(chemin):
-            os.remove(chemin)
-
-st.markdown('<p class="iv-h" style="margin-top:56px">Tonus, sollicitation et élasticité</p>',
-           unsafe_allow_html=True)
-st.markdown('<p class="iv-cap" style="margin:-10px 0 18px">Trois gestes filmés, trois '
-           'lectures complémentaires à la marche. L\'équilibre, lui, est déjà mesuré '
-           'dans Bio-Mobility à partir de l\'oscillation pendant la marche.</p>',
-           unsafe_allow_html=True)
-
-TESTS_BETA = [
-    {"cle": "tonus", "titre": "Tonus (gainage)",
-     "aide": "Filmez de profil, en appui sur avant-bras et pointes de pieds, "
-             "en restant le plus immobile possible.",
-     "fn": pipeline.analyze_tonus,
-     "cartes": lambda f: [
-         carte("Durée tenue", f.get("gainage_duree_s"), " s", dec=1),
-         carte("Stabilité", f.get("gainage_stabilite"), "/100", dec=0),
-         carte("Alignement", f.get("gainage_alignement"), "/100", dec=0),
-     ],
-     "signal_cle": "trunk_y", "signal_titre": "Position verticale du tronc", "signal_unite": "px"},
-    {"cle": "sollicitation", "titre": "Sollicitation anti-ostéoporotique",
-     "aide": "Filmez de profil ou de face une série de petits sauts talon au sol.",
-     "fn": pipeline.analyze_sollicitation,
-     "cartes": lambda f: [
-         carte("Impacts détectés", f.get("impact_nombre"), "", dec=0),
-         carte("Cadence", f.get("impact_taux_par_min"), " /min", dec=0),
-         carte("Vitesse à l'impact", f.get("impact_vitesse_descente"), " m/s", dec=2),
-     ],
-     "signal_cle": "foot_y", "signal_titre": "Hauteur du pied", "signal_unite": "px"},
-    {"cle": "elasticite", "titre": "Élasticité",
-     "aide": "Filmez de face une flexion avant ou un étirement tenu au point le plus loin.",
-     "fn": pipeline.analyze_elasticite,
-     "cartes": lambda f: [
-         carte("Amplitude", f.get("flexion_amplitude_pct"), " %", dec=0),
-         carte("Tenue au maximum", f.get("flexion_maintien_s"), " s", dec=1),
-     ],
-     "signal_cle": "height_px", "signal_titre": "Hauteur de la silhouette", "signal_unite": "px"},
-]
-
-for _test in TESTS_BETA:
-    with st.expander(_test["titre"]):
-        st.markdown(f'<p class="iv-cap" style="margin:0 0 12px">{_test["aide"]}</p>',
-                    unsafe_allow_html=True)
-        _f_beta = st.file_uploader("Vidéo", key=f"beta_{_test['cle']}",
-                                   label_visibility="collapsed")
-        _go_beta = st.button("Analyser", key=f"go_{_test['cle']}",
-                             disabled=_f_beta is None)
-        if _go_beta and _f_beta is not None:
-            if os.path.splitext(_f_beta.name)[1].lower() not in EXTENSIONS_VIDEO:
+    if video_id_actuel != st.session_state.get("_gv_id"):
+        ancien = st.session_state.get("_gv_path")
+        if ancien and os.path.exists(ancien):
+            os.remove(ancien)
+        for _t in TESTS_GESTES:
+            st.session_state.pop(f"_gv_res_{_t['cle']}", None)
+            st.session_state.pop(f"_gv_signal_{_t['cle']}", None)
+            st.session_state.pop(f"_gv_vue_{_t['cle']}", None)
+        st.session_state["_gv_id"] = video_id_actuel
+        st.session_state["_gv_path"] = None
+        if video_geste is not None:
+            if os.path.splitext(video_geste.name)[1].lower() not in EXTENSIONS_VIDEO:
                 st.markdown('<div class="iv-msg iv-msg--stop"><b>Format non reconnu.</b> '
                             'Formats acceptés : MP4, MOV, AVI, MKV, WebM, M4V.</div>',
                             unsafe_allow_html=True)
             else:
-                _chemin_beta = None
-                try:
-                    _suffixe = os.path.splitext(_f_beta.name)[1] or ".mp4"
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=_suffixe) as _tmp:
-                        _tmp.write(_f_beta.getbuffer())
-                        _chemin_beta = _tmp.name
-                    with st.spinner("Analyse en cours…"):
-                        _res_beta = _test["fn"](
-                            _chemin_beta,
-                            subject_height_m=None if echelle > 0 else taille,
-                            px_per_m=echelle if echelle > 0 else None)
-                    st.markdown('<div class="iv-grid">' +
-                                "".join(_test["cartes"](_res_beta["features"])) +
-                                '</div>', unsafe_allow_html=True)
-                    if rejeu_beta is not None:
-                        _signal_beta = _res_beta["signals"].get(_test["signal_cle"])
-                        _fps_beta = _res_beta["signals"].get("fps")
-                        if _signal_beta is not None and _fps_beta:
-                            _html_beta = rejeu_beta.rejeu_signal(
-                                _chemin_beta, _signal_beta, _fps_beta,
-                                _test["signal_unite"], _test["signal_titre"])
-                            if _html_beta:
-                                components.html(_html_beta, height=560, scrolling=False)
-                except Exception:
-                    st.markdown('<div class="iv-msg iv-msg--stop">'
-                                '<b>L\'analyse a échoué.</b> Vérifiez que le fichier '
-                                'est une vidéo lisible.</div>', unsafe_allow_html=True)
-                    st.code(traceback.format_exc(limit=2))
-                finally:
-                    if _chemin_beta and os.path.exists(_chemin_beta):
-                        os.remove(_chemin_beta)
-        st.markdown('<p class="iv-cap" style="margin:12px 0 0">Comme pour la marche : '
+                _suffixe = os.path.splitext(video_geste.name)[1] or ".mp4"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=_suffixe) as _tmp:
+                    _tmp.write(video_geste.getbuffer())
+                    st.session_state["_gv_path"] = _tmp.name
+
+    chemin_geste = st.session_state.get("_gv_path")
+
+    if chemin_geste:
+        st.caption(f"Vidéo chargée : {video_geste.name} — commune aux six onglets, jamais "
+                   "conservée au-delà de cette session. Pour l'enlever, utilisez le ×  "
+                   "du champ ci-dessus.")
+    else:
+        st.markdown('<p class="iv-cap" style="margin:0 0 18px">Comme pour la marche : '
                     'la vidéo est analysée puis supprimée, jamais conservée sur nos '
                     'serveurs.</p>', unsafe_allow_html=True)
+
+
+onglets = st.tabs(["Marche"] + [_t["titre"] for _t in TESTS_GESTES])
+
+with onglets[0]:
+    st.markdown('<p class="iv-cap" style="margin:0 0 14px">Une vidéo de '
+                'quelqu\'un qui marche suffit à mesurer sa vitesse, sa cadence, '
+                'l\'amplitude de ses pas et ce que lui coûtent ses demi-tours.</p>',
+                unsafe_allow_html=True)
+    fichier = st.file_uploader("Vidéo de marche")
+    st.caption("MP4, MOV, AVI, MKV, WebM, M4V. Sur Android, imposer un format ici "
+               "fait parfois disparaître toutes les vidéos du sélecteur — le format "
+               "est donc vérifié après le choix du fichier, pas avant.")
+    lancer = st.button("Analyser", type="primary", disabled=fichier is None,
+                       use_container_width=True)
+
+    if not (lancer and fichier is not None):
+        st.markdown(scene_repos(), unsafe_allow_html=True)
+        st.markdown(LEGENDE, unsafe_allow_html=True)
+    elif os.path.splitext(fichier.name)[1].lower() not in EXTENSIONS_VIDEO:
+        st.markdown('<div class="iv-msg iv-msg--stop"><b>Format non reconnu.</b> '
+                    f'« {fichier.name} » ne ressemble pas à une vidéo. Formats acceptés '
+                    ': MP4, MOV, AVI, MKV, WebM, M4V.</div>', unsafe_allow_html=True)
+    else:
+        chemin = None
+        try:
+            suffixe = os.path.splitext(fichier.name)[1] or ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffixe) as tmp:
+                tmp.write(fichier.getbuffer())
+                chemin = tmp.name
+
+            with st.spinner("Analyse en cours — une à trois minutes…"):
+                traces = body.extract_body(chemin)
+                res = pipeline.analyze(
+                    chemin, mode="mouvement",
+                    subject_height_m=None if echelle > 0 else taille,
+                    px_per_m=echelle if echelle > 0 else None, strict=False)
+
+            f, meta = res["features"], res["meta"]
+            segs = res.get("segments") or {"passes": [], "turns": []}
+            sig = res.get("_signals", {})
+            g = lambda k: f.get(k, float("nan"))
+
+            cx = np.asarray(sig.get("body_cx", traces.centroid[:, 0]), dtype=float)
+            spread = np.asarray(sig.get("body_spread", traces.leg_spread), dtype=float)
+            fps_p = float(sig.get("body_fps", traces.fps))
+            if np.isfinite(cx).sum() > 10:
+                st.markdown(scene_analyse(cx, spread, fps_p, segs.get("passes", []),
+                                          segs.get("turns", [])), unsafe_allow_html=True)
+                st.markdown('<div class="iv-key">'
+                            '<span><i class="k1"></i>déplacement et rythme du sujet</span>'
+                            f'<span><i class="k2"></i>{g("n_steps"):.0f} pas détectés</span>'
+                            f'<span><i class="k3"></i>{g("n_turns"):.0f} demi-tours</span>'
+                            '</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(scene_repos(), unsafe_allow_html=True)
+
+            if not (np.isfinite(g("gait_speed_m_s")) or np.isfinite(g("cadence_spm"))):
+                st.markdown('<div class="iv-msg iv-msg--stop"><b>Aucune marche '
+                            'mesurable dans cette vidéo.</b> Les causes, par fréquence :'
+                            '<ol><li>Le sujet ne <b>traverse</b> pas l\'image. Il faut '
+                            'des allers-retours latéraux, pas du surplace ni de la '
+                            'marche vers la caméra.</li>'
+                            '<li>La caméra bouge. Posez-la sur un support.</li>'
+                            '<li>Le sujet est trop près : cadrez le corps entier avec '
+                            'de la marge.</li>'
+                            '<li>Vidéo trop courte : 30 secondes au moins.</li></ol>'
+                            '</div>', unsafe_allow_html=True)
+
+            bio = kinexa.biomarqueurs(f, meta, age if age > 0 else None) if kinexa else None
+            if bio is None:
+                st.markdown('<div class="iv-msg">Module des biomarqueurs absent : '
+                            'déposez <b>longevis/kinexa.py</b> dans le dépôt pour '
+                            'afficher les quatre lectures de l\'Institut.</div>',
+                            unsafe_allow_html=True)
+            bm, npx, ka, vm = ((bio["bio_mobility"], bio["neuroplasticity"],
+                                bio["kinetic_age"], bio["vitality_margin"])
+                               if bio else ({}, {}, {}, {}))
+            ref = ("classe d'âge" if bm.get("compare_age") else "population adulte")
+            if bm.get("libre"):
+                ref = "amplitude, vigueur et occupation du geste"
+            ecart = ka.get("ecart", float("nan"))
+            if np.isfinite(ecart):
+                sens = "de plus" if ecart > 0 else "de moins"
+                note_age = f"{abs(ecart):.0f} an(s) {sens} que l'âge déclaré"
+            elif ka.get("plateau"):
+                note_age = "avant 65 ans, la vitesse ne date pas une personne"
+            else:
+                note_age = ("lu sur la vigueur du geste" if ka.get("approx")
+                            else "lu dans la vitesse de marche")
+            att = vm.get("attendu", float("nan"))
+            note_vm = (f'attendu {att:.2f} m/s pour '
+                       + ("cet âge" if vm.get("compare_age") else "un adulte")
+                       ) if np.isfinite(att) else "vitesse non mesurée"
+
+            src = str(f.get("speed_source", ""))
+
+            # ── rejeu de la vidéo avec les chiffres incrustés ──────────────────
+            if hologramme is not None and bio:
+                try:
+                    html = hologramme.rejeu(chemin, bio, f, res.get("_signals", {}), meta)
+                except Exception:
+                    html = None
+                if html:
+                    st.markdown('<p class="iv-h">Rejeu incrusté</p>', unsafe_allow_html=True)
+                    facteur = {"compact": 0.7, "normal": 0.9,
+                               "grand": 1.15, "immense": 1.5}.get(taille_rejeu, 1.0)
+                    components.html(html,
+                                    height=int(hologramme.hauteur_composant(meta) * facteur),
+                                    scrolling=False)
+                    st.markdown('<p class="iv-cap" style="margin:-6px 0 22px">'
+                                'Les quatre lectures montent à l\'ouverture ; la vitesse et '
+                                'le compteur de pas suivent l\'image.</p>',
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown('<p class="iv-cap">Vidéo trop lourde pour le rejeu incrusté '
+                                '(28 Mo maximum). Les mesures restent complètes.</p>',
+                                unsafe_allow_html=True)
+
+            if bio:
+                st.markdown('<p class="iv-h">Biomarqueurs · Kinexa Longevity Institute</p>',
+                                unsafe_allow_html=True)
+                st.markdown('<div class="iv-grid">'
+                            + carte("Bio-Mobility Score", bm["score"], "/100",
+                                    f'{ref} · couverture {100*bm["couverture"]:.0f} %',
+                                    hero=True, dec=0)
+                            + carte("Neuroplasticity Index", npx["score"], "/100",
+                                    f'régularité et fluidité · couverture '
+                                    f'{100*npx["couverture"]:.0f} %', dec=0)
+                            + carte("Kinetic Ageing Profile", ka["age"],
+                                    (f' ans ± {ka["marge"]:.0f}'
+                                     if np.isfinite(ka.get("marge", float("nan"))) else " ans"),
+                                    note_age, dec=0)
+                            + carte("Vitality Margin", vm["marge_pct"], "%", note_vm, dec=0)
+                            + '</div>', unsafe_allow_html=True)
+                st.markdown('<p class="iv-cap" style="margin:-4px 0 18px">Agrégats lisibles, '
+                            'sans valeur diagnostique. La couverture indique la part de mesures '
+                            'réellement disponibles derrière chaque score.</p>',
+                            unsafe_allow_html=True)
+
+            # ── profil de vitalité : courbe d'âge, radar, frise ────────────────
+            if vue is not None and bio:
+                st.markdown('<p class="iv-h">Profil de vitalité</p>', unsafe_allow_html=True)
+                st.markdown('<div class="iv-stage" style="margin-top:0;padding:6px 4px">'
+                            + vue.courbe_age(kinexa.COURBE_AGE, g("gait_speed_m_s"),
+                                             ka.get("age"), age if age > 0 else None)
+                            + '</div>', unsafe_allow_html=True)
+                st.markdown('<p class="iv-cap" style="margin:8px 0 20px">'
+                            'La courbe est la vitesse confortable attendue par décennie ; '
+                            'la bande, la dispersion habituelle. Le point est le sujet, '
+                            'le trait vertical son âge locomoteur.</p>',
+                            unsafe_allow_html=True)
+
+                colr, colf = st.columns([1, 1.35], gap="large")
+                with colr:
+                    svg = vue.radar(vue.axes_vitalite(f, bio))
+                    if svg:
+                        st.markdown('<div class="iv-stage" style="margin-top:0;padding:4px">'
+                                    + svg + '</div>', unsafe_allow_html=True)
+                with colf:
+                    seg = res.get("segments") or {}
+                    fr = vue.frise(seg.get("passes", []), seg.get("turns", []),
+                                   int(meta.get("n_frames") or 0),
+                                   float(meta.get("fps") or 25.0))
+                    if fr:
+                        st.markdown('<div class="iv-stage" style="margin-top:0;padding:4px">'
+                                    + fr + '</div>', unsafe_allow_html=True)
+                    st.markdown('<p class="iv-cap">Bleu : les trajets rectilignes. '
+                                'Violet : les demi-tours, dont la durée est le marqueur '
+                                'le plus discriminant du lever-marcher chronométré.</p>',
+                                unsafe_allow_html=True)
+
+            st.markdown('<p class="iv-h">Mesures principales</p>', unsafe_allow_html=True)
+            st.markdown('<p class="iv-cap" style="margin:-10px 0 14px">Mesuré '
+                        'directement sur la personne filmée.</p>', unsafe_allow_html=True)
+            st.markdown('<div class="iv-grid">'
+                        + carte("Vitesse de marche", g("gait_speed_m_s"), "m/s",
+                                f.get("gait_speed_band", ""), hero=True)
+                        + carte("Cadence", g("cadence_spm"), "pas/min", dec=0)
+                        + carte("Amplitude du pas", g("step_length_m"), "m")
+                        + carte("Pas analysés", g("n_steps"), "", dec=0)
+                        + carte("Demi-tours", g("n_turns"), "", dec=0)
+                        + carte("Durée", meta.get("duration_s"), "s", dec=0)
+                        + '</div>', unsafe_allow_html=True)
+
+            st.markdown('<p class="iv-h">Ressenti déclaré</p>', unsafe_allow_html=True)
+            st.markdown('<div class="iv-grid">'
+                        + carte("Énergie perçue", q_energie, "/10", dec=0)
+                        + carte("Fatigue", q_fatigue, "/10", dec=0)
+                        + carte("Humeur", q_humeur, "/10", dec=0)
+                        + carte("Forme générale", q_forme, "/10", dec=0)
+                        + carte("Douleur au test", q_douleur, "/10", dec=0)
+                        + '</div>'
+                        '<p class="iv-cap" style="margin:10px 0 0">Auto-évaluation au '
+                        'moment du test, non mesurée par la vidéo — à lire à côté des '
+                        'indices ci-dessus, pas à la place.</p>', unsafe_allow_html=True)
+
+            st.markdown('<p class="iv-h">Indices composites</p>', unsafe_allow_html=True)
+            st.markdown('<div class="iv-grid">'
+                        + carte("Réserve dynamique · IRD", g("ird_reserve_dynamique"),
+                                "pas", "Pas dépensés à chaque demi-tour", hero=True)
+                        + carte("Signature de foulée · SCF", g("scf_signature_foulee"),
+                                "", "Élevé : pas amples. Bas : pas hachés.",
+                                hero=True, dec=3)
+                        + '</div>'
+                        '<div class="iv-msg">Ces deux indices sont des rapports sans '
+                        'dimension : ils ne dépendent ni de la calibration, ni de la '
+                        'distance de la caméra. Ce sont des <b>hypothèses de '
+                        'recherche</b>, non validées sur cohorte humaine — à lire en '
+                        'comparant une personne à elle-même dans le temps.</div>',
+                        unsafe_allow_html=True)
+
+            st.markdown('<p class="iv-h">Contrôle technique de l\'acquisition</p>',
+                        unsafe_allow_html=True)
+            st.markdown('<p class="iv-cap" style="margin:-10px 0 12px">Qualité de la '
+                        'prise de vue — pas une mesure de la personne filmée.</p>',
+                        unsafe_allow_html=True)
+            with st.expander("Afficher le détail technique", expanded=False):
+                c1, c2 = st.columns([3, 2])
+                with c1:
+                    if traces.preview is not None:
+                        st.image(traces.preview[:, :, ::-1],
+                                 caption="Cadre vert : silhouette détectée. "
+                                         "Trait orange : zone des jambes.",
+                                 use_container_width=True)
+                    else:
+                        st.markdown('<div class="iv-msg iv-msg--stop">Aucune '
+                                    'silhouette isolée. La caméra bouge, le fond est '
+                                    'chargé, ou le sujet occupe presque tout le '
+                                    'champ.</div>', unsafe_allow_html=True)
+                with c2:
+                    st.markdown('<div class="iv-grid" style="grid-template-columns:1fr 1fr">'
+                                + carte("Corps détecté", traces.detection_rate * 100, "%",
+                                        dec=0)
+                                + carte("Caméra", traces.camera_motion_px, "px/img")
+                                + carte("Trajets", g("n_passes"), "", dec=0)
+                                + carte("Échelle", g("px_per_m"), "px/m", dec=0)
+                                + '</div>', unsafe_allow_html=True)
+                    for a in ([] if True else
+                              ["La caméra bouge. Posez-la sur un support stable."]) + \
+                             ([] if traces.detection_rate >= 0.6 else
+                              ["Corps mal détecté. Reculez, dégagez le fond."]) + \
+                             ([] if meta.get("task") == "marche" else
+                              [f"Activité reconnue : « {meta.get('task')} ». "
+                               "Pour la marche, filmez des allers-retours."]):
+                        st.markdown(f'<div class="iv-msg iv-msg--warn">{a}</div>',
+                                    unsafe_allow_html=True)
+                    conseils = ([] if traces.camera_motion_px <= 0.5 else
+                                ["Caméra en mouvement : posez-la sur un support."]) + \
+                               ([] if traces.detection_rate >= 0.6 else
+                                ["Silhouette peu détectée : reculez, dégagez le fond."])
+                    if conseils:
+                        st.markdown('<p class="iv-cap">' + ' · '.join(conseils) + '</p>',
+                                    unsafe_allow_html=True)
+
+            import json as _json
+            mesurable = {k: (round(float(v), 4) if isinstance(v, (int, float)) else v)
+                         for k, v in f.items()
+                         if isinstance(v, (int, float, str))}
+            mesurable["quest_energie"] = q_energie
+            mesurable["quest_fatigue"] = q_fatigue
+            mesurable["quest_humeur"] = q_humeur
+            mesurable["quest_forme_generale"] = q_forme
+            mesurable["quest_douleur"] = q_douleur
+            mesurable["_meta"] = {k: v for k, v in meta.items()
+                                  if isinstance(v, (int, float, str))}
+            csv = "mesure;valeur\n" + "\n".join(
+                f"{k};{v}" for k, v in sorted(mesurable.items()) if k != "_meta")
+            cta, ctb = st.columns(2)
+            cta.download_button("⬇ mesures (CSV)", csv, file_name="kinexa_mesures.csv",
+                                mime="text/csv", use_container_width=True)
+            ctb.download_button("⬇ tout (JSON)", _json.dumps(mesurable, ensure_ascii=False,
+                                                              indent=1),
+                                file_name="kinexa_mesures.json", mime="application/json",
+                                use_container_width=True)
+
+            with st.expander("Détail des scores"):
+                for titre, bloc in [("Bio-Mobility Score", bm), ("Neuroplasticity Index", npx)]:
+                    d = (bloc or {}).get("detail") or {}
+                    if not d:
+                        continue
+                    st.markdown(f'<p class="iv-lab" style="margin:6px 0 4px">{titre} · '
+                                f'couverture {100*(bloc.get("couverture") or 0):.0f} %</p>',
+                                unsafe_allow_html=True)
+                    st.markdown('<table class="iv-tbl"><tbody>' + "".join(
+                        f'<tr><td>{LABELS.get(k, k)}</td>'
+                        f'<td class="iv-v">{v:.0f}<span class="iv-r"> / 100</span></td></tr>'
+                        for k, v in d.items()) + '</tbody></table>', unsafe_allow_html=True)
+                st.caption("Chaque marqueur est noté sur 100 par rapport à sa référence, "
+                           "puis pondéré. Les marqueurs absents ne pèsent pas.")
+
+            with st.expander("Toutes les mesures"):
+                L = ['<table class="iv-tbl"><thead><tr><th>Mesure</th><th>Valeur</th>'
+                     '<th>Référence</th><th>Statut</th></tr></thead><tbody>']
+                for titre, cles in GROUPES:
+                    dispo = [k for k in cles if isinstance(f.get(k), (int, float))
+                             and np.isfinite(f.get(k))]
+                    if not dispo:
+                        continue
+                    L.append(f'<tr><td class="iv-g" colspan="4">{titre}</td></tr>')
+                    for k in dispo:
+                        v = f[k]
+                        norm = REFERENCE_NORMS.get(k)
+                        ref = f"{norm[0]:g} ± {norm[1]:g}" if norm else "—"
+                        dec = 3 if abs(v) < 1 else (0 if abs(v) > 100 else 2)
+                        L.append(f'<tr><td>{LABELS.get(k, k)}</td>'
+                                 f'<td class="iv-v">{v:.{dec}f} '
+                                 f'<span style="color:var(--faint);font-size:11.5px">'
+                                 f'{UNITS.get(k, "")}</span></td>'
+                                 f'<td class="iv-r">{ref}</td><td>{tag(k)}</td></tr>')
+                L.append('</tbody></table>')
+                st.markdown("".join(L), unsafe_allow_html=True)
+                st.markdown('<div class="iv-msg"><b>Non résolu</b> : le bruit propre de '
+                            'la méthode dépasse l\'écart attendu entre deux personnes. '
+                            'La valeur est exacte, mais elle ne permet pas de les '
+                            'distinguer.<br><b>Non fiable</b> : indice n\'ayant pas '
+                            'passé sa validation, à ne pas interpréter.</div>',
+                            unsafe_allow_html=True)
+
+        except Exception:
+            st.markdown('<div class="iv-msg iv-msg--stop"><b>L\'analyse a échoué.</b> '
+                        'Vérifiez que le fichier est une vidéo lisible.</div>',
+                        unsafe_allow_html=True)
+            st.code(traceback.format_exc(limit=2))
+        finally:
+            if chemin and os.path.exists(chemin):
+                os.remove(chemin)
+
+
+for _test, _onglet in zip(TESTS_GESTES, onglets[1:]):
+    with _onglet:
+        _cle = _test["cle"]
+        st.markdown(f'<p class="iv-cap" style="margin:0 0 12px">{_test["aide"]}</p>',
+                    unsafe_allow_html=True)
+        _go_geste = st.button("Analyser", key=f"go_{_cle}",
+                              disabled=chemin_geste is None,
+                              type="primary" if chemin_geste else "secondary")
+        if _go_geste and chemin_geste:
+            try:
+                with st.spinner("Analyse en cours…"):
+                    _res_geste = _test["fn"](
+                        chemin_geste,
+                        subject_height_m=None if echelle > 0 else taille,
+                        px_per_m=echelle if echelle > 0 else None)
+                st.session_state[f"_gv_res_{_cle}"] = _res_geste
+                st.session_state[f"_gv_signal_{_cle}"] = _signal_defaut(
+                    _test, _res_geste["features"])
+            except Exception:
+                st.session_state[f"_gv_res_{_cle}"] = None
+                st.markdown('<div class="iv-msg iv-msg--stop">'
+                            '<b>L\'analyse a échoué.</b> Vérifiez que le fichier '
+                            'est une vidéo lisible.</div>', unsafe_allow_html=True)
+                st.code(traceback.format_exc(limit=2))
+
+        _res_geste = st.session_state.get(f"_gv_res_{_cle}")
+        if _res_geste is not None:
+            _metriques = _test["metriques"](_res_geste["features"])
+            st.markdown('<div class="iv-grid">' + _cartes_html(_metriques) + '</div>',
+                        unsafe_allow_html=True)
+
+            _signaux = _res_geste.get("signals", {})
+            _cles_dispo = [k for k in _signaux if k != "fps" and _signaux.get(k) is not None]
+            _defaut = st.session_state.get(f"_gv_signal_{_cle}", _test["signal_cle"])
+            if _defaut not in _cles_dispo and _cles_dispo:
+                _defaut = _cles_dispo[0]
+
+            _vue = st.radio("Affichage", ["Incrustation", "Vidéo"],
+                            horizontal=True, key=f"_gv_vue_{_cle}")
+
+            if _vue == "Vidéo":
+                if chemin_geste and os.path.exists(chemin_geste):
+                    st.video(chemin_geste)
+            elif rejeu_beta is None:
+                st.markdown('<p class="iv-cap">Le module de rejeu incrusté n\'est '
+                            'pas disponible sur ce déploiement. Les mesures '
+                            'ci-dessus restent valables.</p>', unsafe_allow_html=True)
+            elif not _cles_dispo:
+                st.markdown('<p class="iv-cap">Aucune position n\'a pu être suivie '
+                            'sur cette vidéo pour ce geste — l\'incrustation ne peut '
+                            'pas être construite. Vérifiez que le sujet entier est '
+                            'visible et que la caméra ne bouge pas. Les mesures '
+                            'ci-dessus restent valables.</p>', unsafe_allow_html=True)
+            else:
+                _choix = st.selectbox(
+                    "Mesure à superposer sur la vidéo", _cles_dispo,
+                    index=_cles_dispo.index(_defaut) if _defaut in _cles_dispo else 0,
+                    format_func=lambda k: LABELS_SIGNAUX.get(k, k),
+                    key=f"_gv_choix_{_cle}")
+                st.session_state[f"_gv_signal_{_cle}"] = _choix
+                _facteur_g = TAILLE_REJEU_FACTEUR.get(taille_rejeu, 1.0)
+                _html_geste = None
+                if chemin_geste:
+                    _html_geste = rejeu_beta.rejeu_geste(
+                        chemin_geste, _signaux, _res_geste["meta"], _choix,
+                        LABELS_SIGNAUX.get(_choix, _choix), "px", _metriques,
+                        facteur=_facteur_g)
+                if _html_geste:
+                    components.html(_html_geste,
+                                    height=rejeu_beta.hauteur_composant_geste(_facteur_g),
+                                    scrolling=False)
+                else:
+                    st.markdown('<p class="iv-cap">L\'incrustation n\'a pas pu être '
+                                'générée pour cette vidéo. Les mesures restent '
+                                'complètes.</p>', unsafe_allow_html=True)
+
 
 st.markdown('<p class="iv-h" style="margin-top:56px">Biologie & autres mesures</p>',
            unsafe_allow_html=True)
